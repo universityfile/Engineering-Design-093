@@ -6,47 +6,51 @@
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
 
-#include <Preferences.h>
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "time.h" 
-
-String networkSSID = "TestNetwork"; 
-String networkPassword = "test1234";
 
 //Database constants
 const char* apiKey = "AIzaSyDZGMf2Vor-GsgPfD9IC9Qy2QfmE2soMjg";
 const char* userEmail = "gardenbuddy@gmail.com";
 const char* userPassword = "Test1234";
-const char* projectID = "wateringsystem-1efb2";
+const char* databaseURL = "https://wateringsystem-1efb2-default-rtdb.europe-west1.firebasedatabase.app/";
 
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
 
+String uid;
+String databasePath;
+String timePath = "/time";
+String timeLocalPath = "/timeLocal";
+String waterAmountPath = "/water";
+String rainAmountPath = "/rain";
+String savedAmountPath = "/saved";
+String wateredPath = "/watered";
+String errorPath = "/error";
+String moisturePath = "/moisture";
+String parentPath;
+
 const char* ntpServer = "pool.ntp.org";
 int timestamp;
-FirebaseJson content;
+FirebaseJson json;
 
-long GMToffset;
-int latitude = 51.44;
-int longitude = 5.43;
+//settings
+String networkSSID = "TestNetwork";
+String networkPassword = "test1234";
 
-Preferences preferences;
-AsyncWebServer server(80);
-
-void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-  Serial.println("Setup started");
-  tryToConnectToWifi();
-}
-
-void loop(){
-    sendToDatabase(1.20 , 1.40);
-    delay(5000);
+//gets current time for timestamp
+unsigned long getTime() {
+  time_t now;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    //Serial.println("Failed to obtain time");
+    return(0);
+  }
+  time(&now);
+  return now;
 }
 
 String getLocalTime(){
@@ -64,39 +68,10 @@ String getLocalTime(){
   String temp = String(timestamp);
   temp.replace("/", "-");
   return temp;
-  
 }
-
-//===============================================================================================================================//
-//===============================================================================================================================//
-
-//tries to connect to WiFi without scanning
-bool tryToConnectToWifi(){ 
-  WiFi.begin(networkSSID.c_str(), networkPassword.c_str());
-  int p = 0;
-  //try to connect for 10 seconds
-  while (WiFi.status() != WL_CONNECTED && p < 20) {
-    delay(500);
-    p++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED){
-    Serial.println("");
-    Serial.println("WiFi connected.");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
-    return true;
-  } else {
-    return false;
-  }
-  return false;
-}
-
-//===============================================================================================================================//
-//===============================================================================================================================//
 
 //get offset from GMT time zone
-long getGMToffset(){
+double getRainSetGMToffset(){
   Serial.println("Checking if still connected");
   if ((WiFi.status()==WL_CONNECTED)){
     Serial.println("Still Connected");
@@ -123,11 +98,11 @@ long getGMToffset(){
       }
 
       long offset = doc["utc_offset_seconds"];
-      Serial.println("Daily Rain: " + String(offset) + "\n");
+      Serial.println("GMT offset: " + String(offset) + "\n");
+      configTime(offset, 0 , ntpServer);
       client.end();
-      preferences.putLong("offset", offset);
-      return offset;
-      
+      double rain = doc["daily"]["rain_sum"][0];
+      return rain;
     } else {
       Serial.println("Error on HTTP request");
       return -1;
@@ -141,39 +116,32 @@ long getGMToffset(){
   return -1;
 }
 
-//===============================================================================================================================//
-//===============================================================================================================================//
-
-//gets current time for timestamp
-unsigned long getTime() {
-  time_t now;
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    //Serial.println("Failed to obtain time");
-    return(0);
+bool tryToConnectToWifi(){ 
+  WiFi.begin(networkSSID.c_str(), networkPassword.c_str());
+  int p = 0;
+  //try to connect for 10 seconds
+  while (WiFi.status() != WL_CONNECTED && p < 20) {
+    delay(500);
+    p++;
   }
-  time(&now);
-  return now;
+  
+  if (WiFi.status() == WL_CONNECTED){
+    Serial.println("");
+    Serial.println("WiFi connected.");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  } else {
+    return false;
+  }
+  return false;
 }
 
-//===============================================================================================================================//
-//===============================================================================================================================//
-
-//sends data to database
-void sendToDatabase(float amount, float rainAmount){
-  
-  GMToffset = getGMToffset();
-  if (GMToffset == -1){
-    Serial.println("Unsuccesful");
-    GMToffset = preferences.getLong("offset");
-  }
-  Serial.println("GMT OFFSET" + String(GMToffset));
-  
-  configTime(GMToffset, 0 , ntpServer);
-  
+void sendToDatabase(){
   config.api_key = apiKey;
   auth.user.email = userEmail;
   auth.user.password = userPassword;
+  config.database_url = databaseURL;
   
   Firebase.reconnectWiFi(true);
   fbdo.setResponseSize(4096);
@@ -181,44 +149,56 @@ void sendToDatabase(float amount, float rainAmount){
   config.token_status_callback = tokenStatusCallback; //see addons/TokenHelper.h
 
   // Assign the maximum retry of token generation
-  config.max_token_generation_retry = 10;
+  config.max_token_generation_retry = 5;
 
   // Initialize the library with the Firebase authen and config
   Firebase.begin(&config, &auth);
 
-  if (Firebase.ready()){
-        // We will create the nested document in the parent path "Data/timestamp/"
-        
-        timestamp = getTime();
-        String temp = getLocalTime();
-        Serial.print ("time: ");
-        Serial.println (timestamp);
-        String documentPath = "Data/" + String(timestamp);
-
-        // double
-        content.set("fields/waterAmount/doubleValue", 123.45678);
-        content.set("fields/rainAmount/doubleValue", 456.789);
-        content.set("fields/epoch/integerValue", timestamp);
-        content.set("fields/mytimeStampLocal/stringValue", temp);
-        content.set("fields/watered/booleanValue", true);
-        content.set("fields/waterSaved/doubleValue", 13.555);
-        
-        String doc_path = "projects/";
-        doc_path += projectID;
-        doc_path += "/databases/(default)/documents/coll_id/doc_id"; // coll_id and doc_id are your collection id and document id;
-
-        Serial.print("Create a document... ");
-
-        if (Firebase.Firestore.createDocument(&fbdo, projectID, "" /* databaseId can be (default) or empty */, documentPath.c_str(), content.raw()))
-            Serial.printf("ok\n%s\n\n", fbdo.payload().c_str());
-        else
-            Serial.println(fbdo.errorReason());
+  // Getting the user UID might take a few seconds
+  Serial.println("Getting User UID");
+  while ((auth.token.uid) == "") {
+    Serial.print('.');
+    delay(1000);
   }
+  // Print user UID
+  uid = auth.token.uid.c_str();
+  Serial.print("User UID: ");
+  Serial.println(uid);
+
+  // Update database path
+  databasePath = "/UsersData/" + uid + "/data";
+  Serial.println(WiFi.status());
+  if (Firebase.ready()){
+    
+    //Get current timestamp
+    timestamp = getTime();
+    String tempStr = getLocalTime();
+    Serial.print ("time: ");
+    Serial.println (timestamp);
+    parentPath= databasePath + "/" + String(timestamp);
+    json.set(timePath, String(timestamp));
+    json.set(timeLocalPath, tempStr);
+    json.set(waterAmountPath, 1.2);
+    json.set(rainAmountPath, 1.25);
+    json.set(savedAmountPath, 1.3);
+    json.set(wateredPath, true);
+    json.set(errorPath, true);
+    json.set(moisturePath, 2300);
+    
+    Serial.printf("Set json... %s\n", Firebase.RTDB.setJSON(&fbdo, parentPath.c_str(), &json) ? "ok" : fbdo.errorReason().c_str());
+   }
 }
 
-//===============================================================================================================================//
-//===============================================================================================================================//
-
-void sendErrorToDatabase(){
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(9600);
+  Serial.println("Setup started");
   
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+    tryToConnectToWifi();
+    sendToDatabase();   
+    delay(20000);
 }
